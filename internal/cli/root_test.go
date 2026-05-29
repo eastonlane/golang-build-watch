@@ -2,11 +2,16 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang-build-watch/internal/build"
+	"golang-build-watch/internal/target"
 )
 
 func TestRootCmdRequiresModuleRootArgument(t *testing.T) {
@@ -130,5 +135,36 @@ func TestRootCmdHelpDefaultEnglish(t *testing.T) {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("help output missing %q:\n%s", needle, output)
 		}
+	}
+}
+
+type slowExecutor struct {
+	delay  time.Duration
+	result build.Result
+}
+
+func (e slowExecutor) Run(_ context.Context, _ target.BuildTarget) build.Result {
+	time.Sleep(e.delay)
+	return e.result
+}
+
+func TestRunWithLoadingShowsImmediateMessage(t *testing.T) {
+	var stderr bytes.Buffer
+	result := runWithLoading(
+		context.Background(),
+		slowExecutor{
+			delay:  150 * time.Millisecond,
+			result: build.Result{Target: "./..."},
+		},
+		target.BuildTarget{BuildArg: "./..."},
+		&stderr,
+		true,
+	)
+
+	if result.Target != "./..." {
+		t.Fatalf("Target = %q, want ./...", result.Target)
+	}
+	if !strings.Contains(stderr.String(), "building target ./...") {
+		t.Fatalf("stderr missing loading text:\n%s", stderr.String())
 	}
 }

@@ -179,6 +179,8 @@ func runWithLoading(ctx context.Context, executor build.Executor, t target.Build
 
 	frames := []string{"|", "/", "-", `\`}
 	index := 0
+	fmt.Fprintf(w, "\r[%s] building target %s", frames[index], t.BuildArg)
+	index++
 
 	for {
 		select {
