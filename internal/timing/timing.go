@@ -16,6 +16,28 @@ type Result struct {
 	TotalDuration time.Duration
 }
 
+func FromDurations(durations map[string]time.Duration, total time.Duration) Result {
+	records := make([]PackageRecord, 0, len(durations))
+	for importPath, duration := range durations {
+		records = append(records, PackageRecord{
+			ImportPath: importPath,
+			Duration:   duration,
+		})
+	}
+
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Duration == records[j].Duration {
+			return records[i].ImportPath < records[j].ImportPath
+		}
+		return records[i].Duration > records[j].Duration
+	})
+
+	return Result{
+		Packages:      records,
+		TotalDuration: total,
+	}
+}
+
 func Compute(start, end time.Time, events []PackageRecord) Result {
 	records := make([]PackageRecord, 0, len(events))
 	last := start

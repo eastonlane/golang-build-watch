@@ -1,15 +1,14 @@
 package build
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,12 +36,6 @@ type Result struct {
 	Err    error
 }
 
-type buildEvent struct {
-	ImportPath string
-	Action     string
-	Output     string
-}
-
 func (r Runner) Run(ctx context.Context, t target.BuildTarget) Result {
 	now := r.Now
 	if now == nil {
@@ -50,31 +43,48 @@ func (r Runner) Run(ctx context.Context, t target.BuildTarget) Result {
 	}
 
 	start := now()
-	cmd := exec.CommandContext(ctx, "go", "build", "-json", "-v", "-p=1", t.BuildArg)
-	cmd.Dir = t.ModuleRoot
-
-	stdout, err := cmd.StdoutPipe()
+	eventsFile, err := os.CreateTemp("", "gbwatch-events-*.jsonl")
 	if err != nil {
-		return Result{Err: fmt.Errorf("capture stdout: %w", err)}
+		return Result{Err: fmt.Errorf("create event file: %w", err)}
+	}
+	eventsPath := eventsFile.Name()
+	eventsFile.Close()
+	defer os.Remove(eventsPath)
+
+	selfPath, err := os.Executable()
+	if err != nil {
+		return Result{Err: fmt.Errorf("resolve executable path: %w", err)}
 	}
 
+	toolExecCmd := strings.Join([]string{
+		strconv.Quote(selfPath),
+		"__toolexec",
+		"--events-file",
+		strconv.Quote(eventsPath),
+	}, " ")
+
+	cmd := exec.CommandContext(ctx, "go", "build", "-p=1", "-toolexec", toolExecCmd, t.BuildArg)
+	cmd.Dir = t.ModuleRoot
+
 	var stderr bytes.Buffer
+	cmd.Stdout = &stderr
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
 		return Result{Err: fmt.Errorf("start go build: %w", err)}
 	}
 
-	packages, parseErr := parseBuildOutput(stdout, now, packageFilter(t.ModulePath, r.IncludeAllPackages), r.Logger)
 	waitErr := cmd.Wait()
 	end := now()
 
+	durations, parseErr := readToolExecEvents(eventsPath, packageFilter(t.ModulePath, r.IncludeAllPackages))
+
 	result := Result{
 		Target: t.BuildArg,
-		Timing: timing.Compute(start, end, packages),
+		Timing: timing.FromDurations(durations, end.Sub(start)),
 		Stderr: strings.TrimSpace(stderr.String()),
 	}
-	if len(packages) == 0 {
+	if len(durations) == 0 {
 		result.Advice = append(result.Advice,
 			"no package build output was received; this can happen when Go reuses the build cache",
 			"try `go clean -cache` and run gbwatch again if you want fresh timings",
@@ -140,69 +150,6 @@ func (r ExampleRunner) Run(ctx context.Context, t target.BuildTarget) Result {
 		},
 		Stderr: stderr,
 	}
-}
-
-func parseBuildOutput(r io.Reader, now Clock, include func(string) bool, logger *slog.Logger) ([]timing.PackageRecord, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	partials := map[string]string{}
-	var records []timing.PackageRecord
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-
-		var event buildEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			return records, fmt.Errorf("decode build event: %w", err)
-		}
-
-		logBuildEvent(logger, now, event)
-
-		if event.Action != "build-output" || strings.TrimSpace(event.ImportPath) == "" || event.Output == "" {
-			continue
-		}
-
-		buffer := partials[event.ImportPath] + event.Output
-		lines := strings.Split(buffer, "\n")
-		partials[event.ImportPath] = lines[len(lines)-1]
-
-		for _, candidate := range lines[:len(lines)-1] {
-			if strings.TrimSpace(candidate) != event.ImportPath {
-				continue
-			}
-			if !include(event.ImportPath) {
-				continue
-			}
-			records = append(records, timing.PackageRecord{
-				ImportPath: event.ImportPath,
-				Completed:  now(),
-			})
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return records, fmt.Errorf("scan build output: %w", err)
-	}
-
-	return records, nil
-}
-
-func logBuildEvent(logger *slog.Logger, now Clock, event buildEvent) {
-	if logger == nil {
-		return
-	}
-
-	logger.Debug(
-		"received go build event",
-		slog.String("time", now().Format(time.RFC3339Nano)),
-		slog.String("import_path", event.ImportPath),
-		slog.String("action", event.Action),
-		slog.String("output", strings.TrimSpace(event.Output)),
-	)
 }
 
 func packageFilter(modulePath string, includeAll bool) func(string) bool {

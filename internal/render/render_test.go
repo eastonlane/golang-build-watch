@@ -97,3 +97,26 @@ func TestJSONRenderer(t *testing.T) {
 		t.Fatalf("packages = %#v, want 1 entry", payload["packages"])
 	}
 }
+
+func TestTableRendererShowsFailedBuildNotice(t *testing.T) {
+	result := build.Result{
+		Target: "cmd/server",
+		Timing: timing.Result{
+			Packages: []timing.PackageRecord{
+				{ImportPath: "example.com/app", Duration: time.Second},
+			},
+			TotalDuration: 2 * time.Second,
+		},
+		Err: errors.New("go build failed: exit status 1"),
+	}
+
+	output, err := (render.TableRenderer{}).Render(result)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	for _, needle := range []string{"Status   : failed", "Build    : failed; timings below may be partial"} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("output missing %q:\n%s", needle, output)
+		}
+	}
+}

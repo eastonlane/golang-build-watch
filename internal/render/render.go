@@ -59,6 +59,11 @@ func (r TableRenderer) Render(result build.Result) (string, error) {
 	); err != nil {
 		return "", err
 	}
+	if result.Err != nil {
+		if _, err := fmt.Fprintf(&buf, "Build    : failed; timings below may be partial\n\n"); err != nil {
+			return "", err
+		}
+	}
 
 	tw := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
 	if len(result.Timing.Packages) > 0 {
