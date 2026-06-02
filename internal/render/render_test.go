@@ -98,6 +98,48 @@ func TestJSONRenderer(t *testing.T) {
 	}
 }
 
+func TestTOMLRenderer(t *testing.T) {
+	result := build.Result{
+		Target: "cmd/server",
+		Timing: timing.Result{
+			Packages: []timing.PackageRecord{
+				{ImportPath: "example.com/app", Duration: 2500 * time.Millisecond},
+			},
+			TotalDuration: 3 * time.Second,
+		},
+	}
+
+	output, err := (render.TOMLRenderer{}).Render(result)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	for _, needle := range []string{"Target = \"cmd/server\"", "Status = \"success\"", "DurationMS = 2500"} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("output missing %q:\n%s", needle, output)
+		}
+	}
+}
+
+func TestCSVRenderer(t *testing.T) {
+	result := build.Result{
+		Timing: timing.Result{
+			Packages: []timing.PackageRecord{
+				{ImportPath: "example.com/app", Duration: 2500 * time.Millisecond},
+			},
+		},
+	}
+
+	output, err := (render.CSVRenderer{}).Render(result)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	for _, needle := range []string{"import_path,duration_ms", "\"example.com/app\",2500"} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("output missing %q:\n%s", needle, output)
+		}
+	}
+}
+
 func TestTableRendererShowsFailedBuildNotice(t *testing.T) {
 	result := build.Result{
 		Target: "cmd/server",

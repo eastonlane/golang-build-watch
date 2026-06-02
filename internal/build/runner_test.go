@@ -19,8 +19,8 @@ func TestExampleRunner(t *testing.T) {
 	if len(result.Timing.Packages) == 0 {
 		t.Fatal("expected mock packages")
 	}
-	if result.Target != "." {
-		t.Fatalf("Target = %q, want .", result.Target)
+	if result.Target != "./..." {
+		t.Fatalf("Target = %q, want ./...", result.Target)
 	}
 	if result.Stderr == "" {
 		t.Fatal("expected example note")

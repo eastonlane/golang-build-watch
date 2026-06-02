@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"text/tabwriter"
+
+	"github.com/BurntSushi/toml"
 
 	"golang-build-watch/internal/build"
 )
@@ -17,6 +20,12 @@ type TableRenderer struct {
 }
 
 type JSONRenderer struct {
+}
+
+type TOMLRenderer struct {
+}
+
+type CSVRenderer struct {
 }
 
 type jsonPackage struct {
@@ -132,4 +141,48 @@ func (r JSONRenderer) Render(result build.Result) (string, error) {
 	}
 
 	return string(data) + "\n", nil
+}
+
+func (r TOMLRenderer) Render(result build.Result) (string, error) {
+	payload := jsonResult{
+		Target:        result.Target,
+		TotalDuration: result.Timing.TotalDuration.Milliseconds(),
+		Status:        statusForResult(result),
+		Stderr:        result.Stderr,
+		Advice:        result.Advice,
+	}
+	if result.Err != nil {
+		payload.Error = result.Err.Error()
+	}
+	for _, pkg := range result.Timing.Packages {
+		payload.Packages = append(payload.Packages, jsonPackage{
+			ImportPath: pkg.ImportPath,
+			DurationMS: pkg.Duration.Milliseconds(),
+		})
+	}
+
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(payload); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func (r CSVRenderer) Render(result build.Result) (string, error) {
+	var buf bytes.Buffer
+	buf.WriteString("import_path,duration_ms\n")
+	for _, pkg := range result.Timing.Packages {
+		buf.WriteString(strconv.Quote(pkg.ImportPath))
+		buf.WriteByte(',')
+		buf.WriteString(strconv.FormatInt(pkg.Duration.Milliseconds(), 10))
+		buf.WriteByte('\n')
+	}
+	return buf.String(), nil
+}
+
+func statusForResult(result build.Result) string {
+	if result.Err != nil {
+		return "failed"
+	}
+	return "success"
 }

@@ -15,11 +15,11 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.Settings.Target != "." {
-		t.Fatalf("Target = %q, want .", cfg.Settings.Target)
+	if cfg.Settings.Target != "./..." {
+		t.Fatalf("Target = %q, want ./...", cfg.Settings.Target)
 	}
-	if cfg.Settings.OutputFormat != config.OutputFormatTable {
-		t.Fatalf("OutputFormat = %q, want table", cfg.Settings.OutputFormat)
+	if cfg.Settings.OutputFormat != config.OutputFormatPretty {
+		t.Fatalf("OutputFormat = %q, want pretty", cfg.Settings.OutputFormat)
 	}
 }
 
@@ -32,7 +32,7 @@ func TestLoadMergesFileAndCLI(t *testing.T) {
 
 	target := "./cmd/server"
 	debug := false
-	format := config.OutputFormatTable
+	format := config.OutputFormatTOML
 
 	cfg, err := config.Load(config.NewCLIOverrides(
 		"",
@@ -42,6 +42,7 @@ func TestLoadMergesFileAndCLI(t *testing.T) {
 		nil,
 		&debug,
 		&format,
+		nil,
 	))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -56,13 +57,23 @@ func TestLoadMergesFileAndCLI(t *testing.T) {
 	if cfg.Settings.Debug {
 		t.Fatal("expected Debug overridden by CLI")
 	}
-	if cfg.Settings.OutputFormat != config.OutputFormatTable {
-		t.Fatalf("OutputFormat = %q, want table", cfg.Settings.OutputFormat)
+	if cfg.Settings.OutputFormat != config.OutputFormatTOML {
+		t.Fatalf("OutputFormat = %q, want toml", cfg.Settings.OutputFormat)
 	}
 }
 
 func TestParseOutputFormatRejectsUnknown(t *testing.T) {
 	if _, err := config.ParseOutputFormat("yaml"); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestParseOutputFormatAcceptsLegacyTable(t *testing.T) {
+	format, err := config.ParseOutputFormat("table")
+	if err != nil {
+		t.Fatalf("ParseOutputFormat() error = %v", err)
+	}
+	if format != config.OutputFormatPretty {
+		t.Fatalf("format = %q, want pretty", format)
 	}
 }

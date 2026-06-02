@@ -142,8 +142,13 @@ func (r ExampleRunner) Run(ctx context.Context, t target.BuildTarget) Result {
 		stderr += " with external dependencies included"
 	}
 
+	targetArg := t.BuildArg
+	if strings.TrimSpace(targetArg) == "" {
+		targetArg = "./..."
+	}
+
 	return Result{
-		Target: ".",
+		Target: targetArg,
 		Timing: timing.Result{
 			Packages:      records,
 			TotalDuration: total,

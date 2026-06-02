@@ -1,6 +1,6 @@
 # Golang-Build-Watch
 
-`gbwatch` watches `go build` output and estimates how long each package took to finish building. It helps you understand where build time is being spent for a package, a directory, or a pattern such as `./...`.
+`gbwatch` measures per-package Go build cost by wrapping build tool invocations and aggregating timing data per package. It helps you understand where build time is being spent for a package, a directory, or a pattern such as `./...`.
 
 This project is almost entirely developed by Codex, with iterative direction and review from the repository owner.
 
@@ -67,8 +67,11 @@ gbwatch . --target .
 gbwatch . --target ./...
 gbwatch . --target ./cmd/server
 gbwatch . --target ./... --all-packages
-gbwatch . --target ./... --json
+gbwatch . --target ./... --format json
 gbwatch . --target ./... --debug
+gbwatch . --format json
+gbwatch . --format csv
+gbwatch . --format toml --output-path=./reports/build.toml
 gbwatch --example
 ```
 
@@ -76,13 +79,18 @@ Common flags:
 
 - `--target`: build target relative to the module root
 - `--all-packages`: include packages outside the current module
-- `--json`: render structured JSON
 - `--debug`: enable debug logging
 - `--config`: load a specific config file
+- `--format`: `pretty`, `json`, `toml`, or `csv`
+- `--output-path`, `-o`: write the rendered output to a file instead of stdout
+  - pass `-o` with no value to use an auto-generated filename
+  - pass `--output-path=<path>` or `-o=<path>` to use that path as the base name, with a timestamp suffix added automatically
+  - for `json`, `toml`, and `csv`, gbwatch rewrites a missing or mismatched extension to the format's canonical extension
+  - for `pretty`, gbwatch keeps the user-provided extension as-is
 
 #### JSON output structure
 
-`--json` is intended for shell interaction and scripts. The JSON field names are stable.
+Raw formats are intended for shell interaction and scripts. JSON field names are stable.
 
 Example shape:
 
@@ -134,17 +142,33 @@ Example config:
 target = "./..."
 all_packages = false
 debug = false
-output_format = "table"
+output_format = "pretty"
+output_path = "./reports/build.toml"
 ```
 
 Supported `output_format` values:
 
-- `table`
+- `pretty`
 - `json`
+- `toml`
+- `csv`
+
+Behavior:
+
+- if `output_path` is empty, output is written to stdout
+- if `-o` is passed with no value, gbwatch writes to an auto-generated file name in the current working directory where `gbwatch` is run
+- the auto-generated file name contains a leading text (`gbwatch`), module name, target, and timestamp
+- in the auto-generated file name, target `./...` becomes `all-packages`, target `.` becomes `root-package`, and relative targets such as `./cmd/server` become `cmd-server`
+- if `--output-path=<path>` or `output_path` is set, gbwatch appends a timestamp to the file name before writing so reruns do not overwrite earlier results
+- for `json`, `toml`, and `csv`, gbwatch rewrites the explicit file extension to match the selected format when needed
+- for `pretty`, gbwatch preserves the explicit file name and extension and only adds the timestamp
+- `output_format = "pretty"` gives the human-readable report
+- `output_format = "json"`, `toml`, and `csv` are convenient for later analytics
+- in file mode, only a successful run with captured package timing rows writes a file; failed builds or empty timing results cancel file output and print a pretty advisory report to the console instead
 
 ## 4. Note
 
-- Package timings are inferred from `go build -v` completion output, so they are approximations rather than compiler-internal phase timings.
+- Package timings are measured from wrapped Go tool invocations and aggregated per package. They are much closer to actual build cost than `go build -v`-style output timing, but they still do not represent every possible internal compiler phase separately.
 - `gbwatch` forces sequential builds with `-p=1` so timing deltas are easier to interpret.
 - If no build output is received, Go may have served everything from cache. In that case, try:
 

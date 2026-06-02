@@ -13,8 +13,10 @@ import (
 type OutputFormat string
 
 const (
-	OutputFormatTable OutputFormat = "table"
-	OutputFormatJSON  OutputFormat = "json"
+	OutputFormatPretty OutputFormat = "pretty"
+	OutputFormatJSON   OutputFormat = "json"
+	OutputFormatTOML   OutputFormat = "toml"
+	OutputFormatCSV    OutputFormat = "csv"
 )
 
 type Settings struct {
@@ -22,6 +24,7 @@ type Settings struct {
 	IncludeAllPackages bool
 	Debug              bool
 	OutputFormat       OutputFormat
+	OutputPath         string
 }
 
 type AppConfig struct {
@@ -39,6 +42,7 @@ type CLIOverrides struct {
 	IncludeAllPackages *bool
 	Debug              *bool
 	OutputFormat       *OutputFormat
+	OutputPath         *string
 }
 
 func NewCLIOverrides(
@@ -49,6 +53,7 @@ func NewCLIOverrides(
 	includeAllPackages *bool,
 	debug *bool,
 	outputFormat *OutputFormat,
+	outputPath *string,
 ) CLIOverrides {
 	return CLIOverrides{
 		ModuleRoot:         moduleRoot,
@@ -58,6 +63,7 @@ func NewCLIOverrides(
 		IncludeAllPackages: includeAllPackages,
 		Debug:              debug,
 		OutputFormat:       outputFormat,
+		OutputPath:         outputPath,
 	}
 }
 
@@ -70,6 +76,7 @@ type fileSettings struct {
 	IncludeAllPackages *bool   `toml:"all_packages"`
 	Debug              *bool   `toml:"debug"`
 	OutputFormat       string  `toml:"output_format"`
+	OutputPath         *string `toml:"output_path"`
 }
 
 func Load(cli CLIOverrides) (AppConfig, error) {
@@ -77,10 +84,10 @@ func Load(cli CLIOverrides) (AppConfig, error) {
 		ModuleRoot: cli.ModuleRoot,
 		Example:    cli.Example,
 		Settings: Settings{
-			Target:             ".",
+			Target:             "./...",
 			IncludeAllPackages: false,
 			Debug:              false,
-			OutputFormat:       OutputFormatTable,
+			OutputFormat:       OutputFormatPretty,
 		},
 	}
 
@@ -111,12 +118,15 @@ func Load(cli CLIOverrides) (AppConfig, error) {
 	if cli.OutputFormat != nil {
 		cfg.Settings.OutputFormat = *cli.OutputFormat
 	}
+	if cli.OutputPath != nil {
+		cfg.Settings.OutputPath = strings.TrimSpace(*cli.OutputPath)
+	}
 
 	if cfg.Settings.Target == "" {
-		cfg.Settings.Target = "."
+		cfg.Settings.Target = "./..."
 	}
 	if cfg.Settings.OutputFormat == "" {
-		cfg.Settings.OutputFormat = OutputFormatTable
+		cfg.Settings.OutputFormat = OutputFormatPretty
 	}
 
 	return cfg, nil
@@ -124,10 +134,14 @@ func Load(cli CLIOverrides) (AppConfig, error) {
 
 func ParseOutputFormat(raw string) (OutputFormat, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", string(OutputFormatTable):
-		return OutputFormatTable, nil
+	case "", "table", string(OutputFormatPretty):
+		return OutputFormatPretty, nil
 	case string(OutputFormatJSON):
 		return OutputFormatJSON, nil
+	case string(OutputFormatTOML):
+		return OutputFormatTOML, nil
+	case string(OutputFormatCSV):
+		return OutputFormatCSV, nil
 	default:
 		return "", fmt.Errorf("unknown output format: %s", raw)
 	}
@@ -173,6 +187,9 @@ func mergeFileConfig(cfg *AppConfig, path string) error {
 			return err
 		}
 		cfg.Settings.OutputFormat = format
+	}
+	if raw.Settings.OutputPath != nil {
+		cfg.Settings.OutputPath = strings.TrimSpace(*raw.Settings.OutputPath)
 	}
 
 	return nil
