@@ -39,6 +39,14 @@ This writes the binary to:
 bin/gbwatch
 ```
 
+Override the embedded build version explicitly:
+
+```bash
+make build VERSION=v0.1.0
+```
+
+If `VERSION` is not set, `make` uses the current short git commit hash.
+
 Cross-platform builds:
 
 ```bash
@@ -80,6 +88,7 @@ Common flags:
 - `--target`: build target relative to the module root
 - `--all-packages`: include packages outside the current module
 - `--debug`: enable debug logging
+- `--version`: print the embedded build version and exit
 - `--config`: load a specific config file
 - `--format`: `pretty`, `json`, `toml`, or `csv`
 - `--output-path`, `-o`: write the rendered output to a file instead of stdout

@@ -24,7 +24,14 @@ const autoOutputPathValue = "__auto__"
 
 var outputTimestampNow = time.Now
 
-func NewRootCmd() *cobra.Command {
+func NewRootCmd(buildVersion ...string) *cobra.Command {
+	if len(buildVersion) == 0 {
+		return newRootCmdWithVersion("")
+	}
+	return newRootCmdWithVersion(buildVersion[0])
+}
+
+func newRootCmdWithVersion(buildVersion string) *cobra.Command {
 	var buildTarget string
 	var allPackages bool
 	var example bool
@@ -40,6 +47,7 @@ func NewRootCmd() *cobra.Command {
 		RunE:          newRunE(&buildTarget, &allPackages, &example, &debug, &configPath, &outputFormatRaw, &outputPath),
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Version:       buildVersion,
 	}
 
 	cmd.Flags().StringVarP(&buildTarget, "target", "t", "./...", "build target relative to module root")

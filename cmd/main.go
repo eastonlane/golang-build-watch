@@ -6,6 +6,7 @@ import (
 
 	"golang-build-watch/internal/build"
 	"golang-build-watch/internal/cli"
+	"golang-build-watch/internal/version"
 )
 
 func main() {
@@ -17,7 +18,7 @@ func main() {
 		return
 	}
 
-	if err := cli.NewRootCmd().Execute(); err != nil {
+	if err := cli.NewRootCmd(version.String()).Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

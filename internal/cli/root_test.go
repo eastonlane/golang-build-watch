@@ -119,6 +119,26 @@ func TestRootCmdHelpDefaultEnglish(t *testing.T) {
 	}
 }
 
+func TestRootCmdVersionFlag(t *testing.T) {
+	cmd := newRootCmdWithVersion("test-version")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--version"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if got := strings.TrimSpace(stdout.String()); got != "gbwatch version test-version" {
+		t.Fatalf("stdout = %q, want %q", got, "gbwatch version test-version")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
 func TestRootCmdFileOutputJSON(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "report.json")
