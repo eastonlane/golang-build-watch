@@ -18,11 +18,14 @@ This project is almost entirely developed by Codex, with human direction and rev
 - Positional argument: `<module-root>`
 - Primary target flag: `--target`
 - Output selection:
-  - `--format pretty|json|toml|csv`
-  - `-o`, `--output-path` to write the rendered output to a file
-- If `output_path` is empty, output goes to stdout.
-- If `-o` is passed without a value, generate a default output file name from leading text, module name, target, and timestamp.
-- If `output_path` is set explicitly, append a timestamp suffix before writing so reruns do not overwrite the prior file.
+  - `--format pretty|json|csv`
+  - `-r`, `--report-name` to name a report file
+- If `report_name` is empty and `--report-name` is absent, output goes to stdout.
+- If `-r` is passed without a value, generate a default output file name from leading text, module name, and local build start time with numeric UTC offset.
+- If `report_name` is set explicitly, append the module name and local build start time with numeric UTC offset before writing so reruns do not overwrite the prior file.
+- A recognized report filename extension selects the format; a conflicting explicit `--format` is an error.
+- In CSV file mode, write metadata to `.json` and package timing rows to `.csv` with the same filename stem.
+- `gbwatch help` matches `gbwatch -h`; `gbwatch help format csv` describes CSV file output.
 - In file mode, any non-success path, including failed builds and empty package timing results, must cancel file dumping and print pretty advice to the console instead.
 - `--example` should keep working without a real module root.
 
@@ -34,13 +37,13 @@ This project is almost entirely developed by Codex, with human direction and rev
   - `all_packages`
   - `debug`
   - `output_format`
-  - `output_path`
+  - `report_name` (`output_path` remains a legacy alias)
 - CLI values override config-file values.
 
 ## Output Rules
 
 - Pretty output is for humans and may evolve visually.
-- JSON/TOML/CSV are for automation and analytics.
+- JSON/CSV are for automation and analytics.
 - JSON field names should remain stable unless there is an explicit breaking-change decision.
 - Pretty output should clearly mark failed builds as potentially partial.
 - When no package timing rows are captured, render an explicit empty-state message.

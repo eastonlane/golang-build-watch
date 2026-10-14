@@ -55,7 +55,7 @@ func TestRootCmdExample(t *testing.T) {
 	}
 
 	output := stdout.String()
-	for _, needle := range []string{"GBWATCH REPORT", "Target   : ./...", "example.com/demo/internal/service", "Packages : 4", "Total    : 1.15s", "Status   : success"} {
+	for _, needle := range []string{"GBWATCH REPORT", "Target   : ./...", "example.com/demo/internal/service", "Packages : 4", "Total    : 1 second 150 milliseconds", "Status   : success"} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("output missing %q:\n%s", needle, output)
 		}
@@ -117,6 +117,84 @@ func TestRootCmdHelpDefaultEnglish(t *testing.T) {
 			t.Fatalf("help output missing %q:\n%s", needle, output)
 		}
 	}
+	if strings.Contains(output, autoReportValue) || strings.Contains(output, "string[=") || strings.Contains(output, "output-path") {
+		t.Fatalf("help exposes old or internal report flag:\n%s", output)
+	}
+	if !strings.Contains(output, "-r, --report-name string") {
+		t.Fatalf("help missing report flag:\n%s", output)
+	}
+}
+
+func TestRootCmdHelpTopics(t *testing.T) {
+	tests := []struct {
+		args    []string
+		needles []string
+	}{
+		{[]string{"help"}, []string{"Usage:", "--report-name", "help format"}},
+		{[]string{"help", "format"}, []string{"pretty, json, csv", "gbwatch help format csv"}},
+		{[]string{"help", "format", "csv"}, []string{"same stem", ".json", ".csv", "import_path,duration_ms,duration_human"}},
+		{[]string{"help", "csv"}, []string{"same stem", ".json", ".csv", "import_path,duration_ms,duration_human"}},
+		{[]string{"help", "json"}, []string{".json report", "packages"}},
+		{[]string{"help", "pretty"}, []string{"human-readable report", ".txt"}},
+		{[]string{"help", "report-name"}, []string{"--report-name", "module name", "-f must agree"}},
+	}
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+			cmd := NewRootCmd()
+			var stdout bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetArgs(tt.args)
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			for _, needle := range tt.needles {
+				if !strings.Contains(stdout.String(), needle) {
+					t.Fatalf("help output missing %q:\n%s", needle, stdout.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRootCmdHelpMatchesFlag(t *testing.T) {
+	output := func(args ...string) string {
+		t.Helper()
+		cmd := NewRootCmd()
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute(%v) error = %v", args, err)
+		}
+		return stdout.String()
+	}
+	if help, flag := output("help"), output("-h"); help != flag {
+		t.Fatalf("help and -h differ:\n%s\n%s", help, flag)
+	}
+}
+
+func TestRootCmdUnknownHelpTopicFails(t *testing.T) {
+	for _, args := range [][]string{
+		{"help", "not-a-topic"},
+		{"help", "format", "not-a-format"},
+		{"hep", "not-a-topic"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			cmd := NewRootCmd()
+			cmd.SetArgs(args)
+			if err := cmd.Execute(); err == nil {
+				t.Fatal("Execute() error = nil, want nonzero exit")
+			}
+		})
+	}
+}
+
+func TestRootCmdInvalidBuildArgumentsStillFail(t *testing.T) {
+	cmd := NewRootCmd()
+	cmd.SetArgs([]string{"not-a-command", "another-argument"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected invalid build arguments to fail")
+	}
 }
 
 func TestRootCmdVersionFlag(t *testing.T) {
@@ -150,21 +228,25 @@ func TestRootCmdFileOutputJSON(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--example", "--format", "json", "--output-path=" + outPath})
+	cmd.SetArgs([]string{"--example", "--format", "json", "--report-name=" + outPath})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	expectedPath, mode := resolveOutputPath(cmd, config.AppConfig{
+	expectedPath, mode := resolveOutputPathTemplate(cmd, config.AppConfig{
 		Settings: config.Settings{
 			OutputPath:   outPath,
 			OutputFormat: config.OutputFormatJSON,
 		},
-	}, target.BuildTarget{})
+	})
 	if mode != outputModeExplicit {
 		t.Fatalf("mode = %v, want outputModeExplicit", mode)
 	}
+	expectedPath = finalizeOutputPath(expectedPath, config.OutputFormatJSON, "example", build.Result{
+		StartedAt: time.Date(2026, 1, 2, 15, 4, 5, 0, time.UTC),
+		EndedAt:   time.Date(2026, 1, 2, 15, 4, 6, 150000000, time.UTC),
+	})
 	data, err := os.ReadFile(expectedPath)
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
@@ -180,20 +262,150 @@ func TestRootCmdFileOutputJSON(t *testing.T) {
 	}
 }
 
+func TestRootCmdReportSuffixMatchesExplicitFormat(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "timing")
+	configPath := filepath.Join(dir, "missing-config.toml")
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := NewRootCmd()
+		var stderr bytes.Buffer
+		cmd.SetErr(&stderr)
+		cmd.SetArgs(append([]string{"--example", "--config", configPath}, args...))
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		return stderr.String()
+	}
+
+	firstPath := base + "-example-" + exampleFilenameTimestamp() + ".json"
+	secondPath := base + "-example-" + exampleFilenameTimestamp() + "-2.json"
+	if stderr := run("--report-name", base+".json"); !strings.Contains(stderr, "wrote output file: "+firstPath) {
+		t.Fatalf("suffix-inferred run reported unexpected path: %s", stderr)
+	}
+	if stderr := run("--report-name", base, "-f", "json"); !strings.Contains(stderr, "wrote output file: "+secondPath) {
+		t.Fatalf("explicit-format run reported unexpected path: %s", stderr)
+	}
+	first, err := os.ReadFile(firstPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", firstPath, err)
+	}
+	second, err := os.ReadFile(secondPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", secondPath, err)
+	}
+	if !bytes.Equal(first, second) || !bytes.HasPrefix(first, []byte("{\n")) {
+		t.Fatalf("report content differs or is not JSON:\n%s\n%s", first, second)
+	}
+}
+
+func TestRootCmdRejectsConflictingFormatAndReportSuffix(t *testing.T) {
+	dir := t.TempDir()
+	cmd := NewRootCmd()
+	cmd.SetArgs([]string{"--example", "--config", filepath.Join(dir, "missing-config.toml"), "--report-name", filepath.Join(dir, "timing.json"), "-f", "csv"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "conflicts with output format") {
+		t.Fatalf("Execute() error = %v, want extension/format conflict", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("ReadDir() = %v, %v; want no output files", entries, err)
+	}
+}
+
+func TestRootCmdFileOutputKeepsEarlierReport(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "report.csv")
+	args := []string{"--example", "--format", "csv", "--report-name=" + outPath}
+	firstStem := filepath.Join(dir, "report-example-"+exampleFilenameTimestamp())
+	secondStem := firstStem + "-2"
+	firstPath := firstStem + ".csv"
+	secondPath := secondStem + ".csv"
+
+	run := func() string {
+		t.Helper()
+		cmd := NewRootCmd()
+		var stderr bytes.Buffer
+		cmd.SetErr(&stderr)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		return stderr.String()
+	}
+
+	if stderr := run(); !strings.Contains(stderr, "wrote output file: "+firstPath) || !strings.Contains(stderr, "wrote output file: "+firstStem+".json") {
+		t.Fatalf("first run reported unexpected path: %s", stderr)
+	}
+	if err := os.WriteFile(firstPath, []byte("keep earlier report"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if stderr := run(); !strings.Contains(stderr, "wrote output file: "+secondPath) || !strings.Contains(stderr, "wrote output file: "+secondStem+".json") {
+		t.Fatalf("second run reported unexpected path: %s", stderr)
+	}
+
+	first, err := os.ReadFile(firstPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", firstPath, err)
+	}
+	if string(first) != "keep earlier report" {
+		t.Fatalf("first report was replaced: %q", first)
+	}
+	second, err := os.ReadFile(secondPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", secondPath, err)
+	}
+	if !strings.HasPrefix(string(second), "import_path,duration_ms,duration_human\n") {
+		t.Fatalf("second report has unexpected content: %q", second)
+	}
+	metadata, err := os.ReadFile(secondStem + ".json")
+	if err != nil {
+		t.Fatalf("ReadFile(metadata) error = %v", err)
+	}
+	if !strings.Contains(string(metadata), `"target": "./..."`) || strings.Contains(string(metadata), `"packages"`) {
+		t.Fatalf("metadata JSON should contain no package rows: %s", metadata)
+	}
+}
+
+func TestRootCmdCSVPairSkipsPartiallyOccupiedStem(t *testing.T) {
+	dir := t.TempDir()
+	firstStem := filepath.Join(dir, "report-example-"+exampleFilenameTimestamp())
+	secondStem := firstStem + "-2"
+	if err := os.WriteFile(firstStem+".csv", []byte("existing report"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cmd := NewRootCmd()
+	cmd.SetArgs([]string{"--example", "--format", "csv", "--report-name=" + filepath.Join(dir, "report.csv")})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if _, err := os.Stat(firstStem + ".json"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("first JSON companion should have been removed: %v", err)
+	}
+	for _, ext := range []string{".json", ".csv"} {
+		if _, err := os.Stat(secondStem + ext); err != nil {
+			t.Fatalf("missing paired report %s: %v", secondStem+ext, err)
+		}
+	}
+	data, err := os.ReadFile(firstStem + ".csv")
+	if err != nil || string(data) != "existing report" {
+		t.Fatalf("existing CSV was replaced: %q, %v", data, err)
+	}
+}
+
 func TestRootCmdFileOutputAutoNaming(t *testing.T) {
+	t.Chdir(t.TempDir())
 	restore := stubOutputTimestampNow(t, time.Date(2026, 6, 2, 12, 34, 56, 0, time.UTC))
 	defer restore()
 
-	expectedPath := filepath.Join(".", "gbwatch-example-all-packages-20260602-123456.toml")
-	_ = os.Remove(expectedPath)
-	defer os.Remove(expectedPath)
+	expectedPath := filepath.Join(".", "gbwatch-example-"+exampleFilenameTimestamp()+".json")
 
 	cmd := NewRootCmd()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--example", "--format", "toml", "-o"})
+	cmd.SetArgs([]string{"--example", "--format", "json", "-r"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -206,7 +418,7 @@ func TestRootCmdFileOutputAutoNaming(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty when output-mode=file", stdout.String())
 	}
-	for _, needle := range []string{"Status = \"success\"", "Target = \"./...\""} {
+	for _, needle := range []string{`"status": "success"`, `"target": "./..."`} {
 		if !strings.Contains(string(data), needle) {
 			t.Fatalf("file missing %q:\n%s", needle, string(data))
 		}
@@ -226,19 +438,19 @@ func TestRootCmdFileOutputShortFlagConsumesTrailingPath(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--example", "-o", filepath.Join(dir, "aaa"), "--format", "toml"})
+	cmd.SetArgs([]string{"--example", "-r", filepath.Join(dir, "aaa"), "--format", "json"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	expectedPath := filepath.Join(dir, "aaa-20260602-123456.toml")
+	expectedPath := filepath.Join(dir, "aaa-example-"+exampleFilenameTimestamp()+".json")
 	data, err := os.ReadFile(expectedPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%q) error = %v", expectedPath, err)
 	}
-	if !strings.Contains(string(data), "Status = \"success\"") {
-		t.Fatalf("file missing toml payload:\n%s", string(data))
+	if !strings.Contains(string(data), `"status": "success"`) {
+		t.Fatalf("file missing json payload:\n%s", string(data))
 	}
 }
 
@@ -252,19 +464,19 @@ func TestRootCmdFileOutputLongFlagConsumesTrailingPath(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--example", "--output-path", filepath.Join(dir, "aaa"), "--format", "toml"})
+	cmd.SetArgs([]string{"--example", "--report-name", filepath.Join(dir, "aaa"), "--format", "json"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	expectedPath := filepath.Join(dir, "aaa-20260602-123456.toml")
+	expectedPath := filepath.Join(dir, "aaa-example-"+exampleFilenameTimestamp()+".json")
 	data, err := os.ReadFile(expectedPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%q) error = %v", expectedPath, err)
 	}
-	if !strings.Contains(string(data), "Status = \"success\"") {
-		t.Fatalf("file missing toml payload:\n%s", string(data))
+	if !strings.Contains(string(data), `"status": "success"`) {
+		t.Fatalf("file missing json payload:\n%s", string(data))
 	}
 }
 
@@ -289,7 +501,7 @@ func TestRootCmdFileOutputFallsBackToPrettyForEmptyResults(t *testing.T) {
 		}
 		return result.Err
 	}
-	cmd.SetArgs([]string{"--example", "--format", "json", "--output-path=" + outPath})
+	cmd.SetArgs([]string{"--example", "--format", "json", "--report-name=" + outPath})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -334,7 +546,7 @@ func TestRootCmdFileOutputFallsBackToPrettyForFailures(t *testing.T) {
 		}
 		return result.Err
 	}
-	cmd.SetArgs([]string{"--example", "--format", "json", "--output-path=" + outPath})
+	cmd.SetArgs([]string{"--example", "--format", "json", "--report-name=" + outPath})
 
 	err := cmd.Execute()
 	if err == nil {
@@ -369,6 +581,15 @@ func TestRootCmdRejectsUnknownJSONFlag(t *testing.T) {
 	}
 }
 
+func TestRootCmdRejectsTOMLOutput(t *testing.T) {
+	cmd := NewRootCmd()
+	cmd.SetArgs([]string{"--example", "--format", "toml"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unsupported output format: toml") {
+		t.Fatalf("Execute() error = %v, want unsupported TOML format", err)
+	}
+}
+
 type slowExecutor struct {
 	delay  time.Duration
 	result build.Result
@@ -400,31 +621,28 @@ func TestRunWithLoadingShowsImmediateMessage(t *testing.T) {
 	}
 }
 
-func TestResolveOutputPathAuto(t *testing.T) {
-	restore := stubOutputTimestampNow(t, time.Date(2026, 6, 2, 12, 34, 56, 0, time.UTC))
-	defer restore()
-
+func TestResolveOutputPathTemplateAuto(t *testing.T) {
 	cmd := NewRootCmd()
 
 	appCfg := config.AppConfig{
 		Settings: config.Settings{
 			OutputFormat: config.OutputFormatJSON,
-			OutputPath:   autoOutputPathValue,
+			OutputPath:   autoReportValue,
 			Target:       "./cmd/server",
 		},
 	}
 
-	path, mode := resolveOutputPath(cmd, appCfg, target.BuildTarget{})
+	path, mode := resolveOutputPathTemplate(cmd, appCfg)
 	if mode != outputModeAuto {
 		t.Fatalf("mode = %v, want outputModeAuto", mode)
 	}
-	if path != filepath.Join(".", "gbwatch-example-cmd-server-20260602-123456.json") {
+	if path != filepath.Join(".", "gbwatch.json") {
 		t.Fatalf("path = %q", path)
 	}
 }
 
 func TestNormalizeOutputPathArgsConsumesTrailingPath(t *testing.T) {
-	outputPath, args := normalizeOutputPathArgs(autoOutputPathValue, []string{"D:/repos/CID/cbase", "aaa"})
+	outputPath, args := normalizeOutputPathArgs(autoReportValue, []string{"D:/repos/CID/cbase", "aaa"}, false)
 	if outputPath != "aaa" {
 		t.Fatalf("outputPath = %q, want aaa", outputPath)
 	}
@@ -433,29 +651,21 @@ func TestNormalizeOutputPathArgsConsumesTrailingPath(t *testing.T) {
 	}
 }
 
-func TestFormatOutputTargetSegment(t *testing.T) {
-	tests := map[string]string{
-		"./...":        "all-packages",
-		"...":          "all-packages",
-		".":            "root-package",
-		"./":           "root-package",
-		"./cmd/server": "cmd-server",
-		"cmd/server":   "cmd-server",
-		"./cmd.v2/api": "cmd-v2-api",
-		"weird target": "weird-target",
-	}
-
-	for input, want := range tests {
-		if got := formatOutputTargetSegment(input); got != want {
-			t.Fatalf("formatOutputTargetSegment(%q) = %q, want %q", input, got, want)
-		}
+func TestNormalizeOutputPathArgsKeepsModuleRootForBareFlag(t *testing.T) {
+	outputPath, args := normalizeOutputPathArgs(autoReportValue, []string{"D:/repos/CID/cbase"}, false)
+	if outputPath != autoReportValue || len(args) != 1 || args[0] != "D:/repos/CID/cbase" {
+		t.Fatalf("outputPath = %q, args = %#v", outputPath, args)
 	}
 }
 
-func TestResolveOutputPathExplicitAddsTimestamp(t *testing.T) {
-	restore := stubOutputTimestampNow(t, time.Date(2026, 6, 2, 12, 34, 56, 0, time.UTC))
-	defer restore()
+func TestDefaultOutputPathBaseUsesReportName(t *testing.T) {
+	appCfg := config.AppConfig{Settings: config.Settings{OutputFormat: config.OutputFormatPretty}}
+	if got := defaultOutputPathBase(appCfg); got != "gbwatch.txt" {
+		t.Fatalf("defaultOutputPathBase() = %q", got)
+	}
+}
 
+func TestResolveOutputPathTemplateExplicitKeepsExtension(t *testing.T) {
 	cmd := NewRootCmd()
 	appCfg := config.AppConfig{
 		Settings: config.Settings{
@@ -464,19 +674,16 @@ func TestResolveOutputPathExplicitAddsTimestamp(t *testing.T) {
 		},
 	}
 
-	path, mode := resolveOutputPath(cmd, appCfg, target.BuildTarget{})
+	path, mode := resolveOutputPathTemplate(cmd, appCfg)
 	if mode != outputModeExplicit {
 		t.Fatalf("mode = %v, want outputModeExplicit", mode)
 	}
-	if path != filepath.Join("reports", "build-20260602-123456.json") {
+	if path != filepath.Join("reports", "build.json") {
 		t.Fatalf("path = %q", path)
 	}
 }
 
-func TestResolveOutputPathExplicitOverridesWrongExtensionForStructuredFormat(t *testing.T) {
-	restore := stubOutputTimestampNow(t, time.Date(2026, 6, 2, 12, 34, 56, 0, time.UTC))
-	defer restore()
-
+func TestResolveOutputPathTemplateExplicitOverridesWrongExtensionForStructuredFormat(t *testing.T) {
 	cmd := NewRootCmd()
 	appCfg := config.AppConfig{
 		Settings: config.Settings{
@@ -485,19 +692,16 @@ func TestResolveOutputPathExplicitOverridesWrongExtensionForStructuredFormat(t *
 		},
 	}
 
-	path, mode := resolveOutputPath(cmd, appCfg, target.BuildTarget{})
+	path, mode := resolveOutputPathTemplate(cmd, appCfg)
 	if mode != outputModeExplicit {
 		t.Fatalf("mode = %v, want outputModeExplicit", mode)
 	}
-	if path != filepath.Join("reports", "build-20260602-123456.csv") {
+	if path != filepath.Join("reports", "build.csv") {
 		t.Fatalf("path = %q", path)
 	}
 }
 
-func TestResolveOutputPathExplicitKeepsPrettyExtensionVerbatim(t *testing.T) {
-	restore := stubOutputTimestampNow(t, time.Date(2026, 6, 2, 12, 34, 56, 0, time.UTC))
-	defer restore()
-
+func TestResolveOutputPathTemplateExplicitKeepsPrettyExtensionVerbatim(t *testing.T) {
 	cmd := NewRootCmd()
 	appCfg := config.AppConfig{
 		Settings: config.Settings{
@@ -506,13 +710,40 @@ func TestResolveOutputPathExplicitKeepsPrettyExtensionVerbatim(t *testing.T) {
 		},
 	}
 
-	path, mode := resolveOutputPath(cmd, appCfg, target.BuildTarget{})
+	path, mode := resolveOutputPathTemplate(cmd, appCfg)
 	if mode != outputModeExplicit {
 		t.Fatalf("mode = %v, want outputModeExplicit", mode)
 	}
-	if path != filepath.Join("reports", "build-20260602-123456.log") {
+	if path != filepath.Join("reports", "build.log") {
 		t.Fatalf("path = %q", path)
 	}
+}
+
+func TestFinalizeOutputPathUsesModuleAndBuildStart(t *testing.T) {
+	result := build.Result{
+		StartedAt: time.Date(2026, 6, 3, 8, 4, 0, 0, time.UTC),
+		EndedAt:   time.Date(2026, 6, 3, 8, 4, 3, 0, time.UTC),
+	}
+
+	path := finalizeOutputPath(filepath.Join("reports", "build.csv"), config.OutputFormatCSV, "my-module", result)
+	want := filepath.Join("reports", "build-my-module-"+result.StartedAt.In(time.Local).Format("20060102-150405-0700")+".csv")
+	if path != want {
+		t.Fatalf("path = %q", path)
+	}
+}
+
+func TestFinalizeOutputPathUsesLocalOffset(t *testing.T) {
+	startedAt := time.Date(2026, 10, 14, 7, 9, 59, 0, time.UTC)
+	result := build.Result{StartedAt: startedAt}
+	path := finalizeOutputPath("report.json", config.OutputFormatJSON, "module", result)
+	want := "report-module-" + startedAt.In(time.Local).Format("20060102-150405-0700") + ".json"
+	if path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+}
+
+func exampleFilenameTimestamp() string {
+	return time.Date(2026, 1, 2, 15, 4, 5, 0, time.UTC).In(time.Local).Format("20060102-150405-0700")
 }
 
 func stubOutputTimestampNow(t *testing.T, ts time.Time) func() {

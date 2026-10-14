@@ -20,7 +20,7 @@ import (
 	"golang-build-watch/internal/target"
 )
 
-const autoOutputPathValue = "__auto__"
+const autoReportValue = "__auto__"
 
 var outputTimestampNow = time.Now
 
@@ -43,6 +43,7 @@ func newRootCmdWithVersion(buildVersion string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "gbwatch <module-root>",
 		Short:         "Measure approximate build time per package for a Go module",
+		Example:       "  gbwatch help format\n  gbwatch help format csv",
 		Args:          rootArgs(&example),
 		RunE:          newRunE(&buildTarget, &allPackages, &example, &debug, &configPath, &outputFormatRaw, &outputPath),
 		SilenceUsage:  true,
@@ -52,18 +53,35 @@ func newRootCmdWithVersion(buildVersion string) *cobra.Command {
 
 	cmd.Flags().StringVarP(&buildTarget, "target", "t", "./...", "build target relative to module root")
 	cmd.Flags().StringVar(&configPath, "config", "", "path to a config file; defaults to ~/.gbwatch.toml")
-	cmd.Flags().StringVarP(&outputFormatRaw, "format", "f", "", "output format: pretty, json, toml, or csv")
-	cmd.Flags().StringVarP(&outputPath, "output-path", "o", "", "write the rendered output to this file instead of stdout")
-	cmd.Flags().Lookup("output-path").NoOptDefVal = autoOutputPathValue
+	cmd.Flags().StringVarP(&outputFormatRaw, "format", "f", "", "output format: pretty, json, or csv")
+	cmd.Flags().StringVarP(&outputPath, "report-name", "r", "", "report filename or path; .json/.csv/.txt selects format, no value generates a name (default: stdout)")
+	cmd.Flags().Lookup("report-name").NoOptDefVal = autoReportValue
+	defaultHelp := cmd.HelpFunc()
+	cmd.SetHelpFunc(func(c *cobra.Command, args []string) {
+		flag := c.Flags().Lookup("report-name")
+		if flag == nil {
+			defaultHelp(c, args)
+			return
+		}
+		noOptDefault := flag.NoOptDefVal
+		flag.NoOptDefVal = ""
+		defer func() { flag.NoOptDefVal = noOptDefault }()
+		defaultHelp(c, args)
+	})
 	cmd.Flags().BoolVar(&allPackages, "all-packages", false, "include packages outside the target module in timing output")
 	cmd.Flags().BoolVar(&example, "example", false, "print mock build timing output and exit")
 	cmd.Flags().BoolVar(&debug, "debug", false, "enable debug logging")
+	help := newHelpCommand(cmd)
+	cmd.AddCommand(help)
+	cmd.SetHelpCommand(help)
+	cmd.InitDefaultHelpFlag()
+	cmd.InitDefaultVersionFlag()
 	return cmd
 }
 
 func rootArgs(example *bool) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
-		_, normalizedArgs := normalizeOutputPathArgs(flagValue(cmd, "output-path"), args)
+		_, normalizedArgs := normalizeOutputPathArgs(flagValue(cmd, "report-name"), args, *example)
 		if *example {
 			if len(normalizedArgs) > 1 {
 				return errors.New("accepts at most one positional module-root argument in example mode")
@@ -90,12 +108,18 @@ func newRunE(
 	outputPath *string,
 ) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
-		outputPathValue, normalizedArgs := normalizeOutputPathArgs(*outputPath, args)
+		outputPathValue, normalizedArgs := normalizeOutputPathArgs(*outputPath, args, *example)
 		moduleRoot := ""
 		if len(normalizedArgs) > 0 {
 			moduleRoot = normalizedArgs[0]
 		}
 
+		formatOverride := outputFormatOverride(cmd, *outputFormatRaw)
+		if formatOverride == nil && cmd.Flags().Changed("report-name") {
+			if format, ok := config.OutputFormatFromReportName(outputPathValue); ok {
+				formatOverride = &format
+			}
+		}
 		appCfg, err := config.Load(config.NewCLIOverrides(
 			moduleRoot,
 			*example,
@@ -103,11 +127,14 @@ func newRunE(
 			flagString(cmd, "target", *buildTarget),
 			flagBool(cmd, "all-packages", *allPackages),
 			flagBool(cmd, "debug", *debug),
-			outputFormatOverride(cmd, *outputFormatRaw),
-			flagString(cmd, "output-path", outputPathValue),
+			formatOverride,
+			flagString(cmd, "report-name", outputPathValue),
 		))
 		if err != nil {
 			return err
+		}
+		if inferred, ok := config.OutputFormatFromReportName(appCfg.Settings.OutputPath); ok && inferred != appCfg.Settings.OutputFormat {
+			return fmt.Errorf("report name extension %q conflicts with output format %q", filepath.Ext(appCfg.Settings.OutputPath), appCfg.Settings.OutputFormat)
 		}
 
 		executor, targetValue, err := executorForConfig(cmd, appCfg)
@@ -120,7 +147,7 @@ func newRunE(
 			return err
 		}
 
-		resolvedOutputPath, outputMode := resolveOutputPath(cmd, appCfg, targetValue)
+		outputPathTemplate, outputMode := resolveOutputPathTemplate(cmd, appCfg)
 
 		result := runWithLoading(
 			context.Background(),
@@ -144,10 +171,22 @@ func newRunE(
 				}
 				return result.Err
 			}
-			if err := writeOutputFile(resolvedOutputPath, output); err != nil {
+			resolvedOutputPath := finalizeOutputPath(outputPathTemplate, appCfg.Settings.OutputFormat, defaultOutputModuleName(appCfg, targetValue), result)
+			files := []reportFile{{extension: filepath.Ext(resolvedOutputPath), content: output}}
+			if appCfg.Settings.OutputFormat == config.OutputFormatCSV {
+				metadata, err := (render.MetadataJSONRenderer{}).Render(result)
+				if err != nil {
+					return err
+				}
+				files = []reportFile{{extension: ".json", content: metadata}, {extension: ".csv", content: output}}
+			}
+			writtenPaths, err := writeReportFiles(resolvedOutputPath, files)
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "wrote output file: %s\n", resolvedOutputPath)
+			for _, path := range writtenPaths {
+				fmt.Fprintf(cmd.ErrOrStderr(), "wrote output file: %s\n", path)
+			}
 		} else {
 			if _, err := fmt.Fprint(cmd.OutOrStdout(), output); err != nil {
 				return err
@@ -160,8 +199,12 @@ func newRunE(
 	}
 }
 
-func normalizeOutputPathArgs(outputPath string, args []string) (string, []string) {
-	if outputPath == autoOutputPathValue && len(args) > 0 {
+func normalizeOutputPathArgs(outputPath string, args []string, example bool) (string, []string) {
+	moduleArgs := 1
+	if example {
+		moduleArgs = 0
+	}
+	if outputPath == autoReportValue && len(args) > moduleArgs {
 		return strings.TrimSpace(args[len(args)-1]), args[:len(args)-1]
 	}
 	return outputPath, args
@@ -192,8 +235,6 @@ func rendererForConfig(appCfg config.AppConfig) (render.Renderer, error) {
 		return render.TableRenderer{}, nil
 	case config.OutputFormatJSON:
 		return render.JSONRenderer{}, nil
-	case config.OutputFormatTOML:
-		return render.TOMLRenderer{}, nil
 	case config.OutputFormatCSV:
 		return render.CSVRenderer{}, nil
 	default:
@@ -281,15 +322,69 @@ func outputFormatOverride(cmd *cobra.Command, raw string) *config.OutputFormat {
 	return nil
 }
 
-func writeOutputFile(path string, output string) error {
+type reportFile struct {
+	extension string
+	content   string
+}
+
+func writeReportFiles(path string, reports []reportFile) ([]string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
+		return nil, fmt.Errorf("create output directory: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(output), 0o644); err != nil {
+	base := strings.TrimSuffix(path, filepath.Ext(path))
+	for suffix := 1; ; suffix++ {
+		candidateBase := base
+		if suffix > 1 {
+			candidateBase = fmt.Sprintf("%s-%d", base, suffix)
+		}
+		paths := make([]string, 0, len(reports))
+		files := make([]*os.File, 0, len(reports))
+		collision := false
+		for _, report := range reports {
+			candidate := candidateBase + report.extension
+			file, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+			if errors.Is(err, os.ErrExist) {
+				collision = true
+				break
+			}
+			if err != nil {
+				removeReportFiles(paths, files)
+				return nil, fmt.Errorf("create output file: %w", err)
+			}
+			paths = append(paths, candidate)
+			files = append(files, file)
+		}
+		if collision {
+			removeReportFiles(paths, files)
+			continue
+		}
+		for i, file := range files {
+			if _, err := file.WriteString(reports[i].content); err != nil {
+				removeReportFiles(paths, files)
+				return nil, fmt.Errorf("write output file: %w", err)
+			}
+		}
+		for i, file := range files {
+			if err := file.Close(); err != nil {
+				files[i] = nil
+				removeReportFiles(paths, files)
+				return nil, fmt.Errorf("close output file: %w", err)
+			}
+			files[i] = nil
+		}
+		return paths, nil
+	}
+}
+
+func removeReportFiles(paths []string, files []*os.File) {
+	for _, file := range files {
+		if file != nil {
+			_ = file.Close()
+		}
+	}
+	for _, path := range paths {
 		_ = os.Remove(path)
-		return fmt.Errorf("write output file: %w", err)
 	}
-	return nil
 }
 
 func shouldWriteOutputFile(result build.Result) bool {
@@ -313,23 +408,20 @@ const (
 	outputModeExplicit
 )
 
-func resolveOutputPath(cmd *cobra.Command, appCfg config.AppConfig, targetValue target.BuildTarget) (string, outputPathMode) {
-	if !cmd.Flags().Changed("output-path") && strings.TrimSpace(appCfg.Settings.OutputPath) == "" {
+func resolveOutputPathTemplate(cmd *cobra.Command, appCfg config.AppConfig) (string, outputPathMode) {
+	if !cmd.Flags().Changed("report-name") && strings.TrimSpace(appCfg.Settings.OutputPath) == "" {
 		return "", outputModeStdout
 	}
 
 	outputPath := strings.TrimSpace(appCfg.Settings.OutputPath)
-	if outputPath == autoOutputPathValue {
-		return defaultOutputPath(appCfg, targetValue), outputModeAuto
+	if outputPath == autoReportValue {
+		return defaultOutputPathBase(appCfg), outputModeAuto
 	}
-	return appendTimestampToPath(outputPath, appCfg.Settings.OutputFormat), outputModeExplicit
+	return normalizeExplicitOutputPathBase(outputPath, appCfg.Settings.OutputFormat), outputModeExplicit
 }
 
-func defaultOutputPath(appCfg config.AppConfig, targetValue target.BuildTarget) string {
-	moduleName := defaultOutputModuleName(appCfg, targetValue)
-	targetName := formatOutputTargetSegment(defaultOutputTargetName(appCfg, targetValue))
-	timestamp := outputTimestampNow().Format("20060102-150405")
-	filename := fmt.Sprintf("gbwatch-%s-%s-%s.%s", moduleName, targetName, timestamp, outputFileExtension(appCfg.Settings.OutputFormat))
+func defaultOutputPathBase(appCfg config.AppConfig) string {
+	filename := "gbwatch." + outputFileExtension(appCfg.Settings.OutputFormat)
 	return filepath.Join(".", filename)
 }
 
@@ -340,20 +432,22 @@ func defaultOutputModuleName(appCfg config.AppConfig, targetValue target.BuildTa
 	return "example"
 }
 
-func defaultOutputTargetName(appCfg config.AppConfig, targetValue target.BuildTarget) string {
-	if strings.TrimSpace(targetValue.BuildArg) != "" {
-		return targetValue.BuildArg
+func finalizeOutputPath(pathBase string, format config.OutputFormat, moduleName string, result build.Result) string {
+	startTimestamp := outputTimestampNow().In(time.Local).Format("20060102-150405-0700")
+	if !result.StartedAt.IsZero() {
+		startTimestamp = result.StartedAt.In(time.Local).Format("20060102-150405-0700")
 	}
-	if strings.TrimSpace(appCfg.Settings.Target) != "" {
-		return appCfg.Settings.Target
+	ext := filepath.Ext(pathBase)
+	if format != config.OutputFormatPretty {
+		ext = "." + outputFileExtension(format)
 	}
-	return "./..."
+	base := strings.TrimSuffix(pathBase, ext)
+	return fmt.Sprintf("%s-%s-%s%s", base, moduleName, startTimestamp, ext)
 }
 
-func appendTimestampToPath(path string, format config.OutputFormat) string {
-	timestamp := outputTimestampNow().Format("20060102-150405")
+func normalizeExplicitOutputPathBase(path string, format config.OutputFormat) string {
 	base, ext := splitOutputPath(path, format)
-	return base + "-" + timestamp + ext
+	return base + ext
 }
 
 func splitOutputPath(path string, format config.OutputFormat) (string, string) {
@@ -374,8 +468,6 @@ func outputFileExtension(format config.OutputFormat) string {
 	switch format {
 	case config.OutputFormatJSON:
 		return "json"
-	case config.OutputFormatTOML:
-		return "toml"
 	case config.OutputFormatCSV:
 		return "csv"
 	default:
@@ -395,21 +487,4 @@ func sanitizeOutputSegment(value string) string {
 		return "root"
 	}
 	return trimmed
-}
-
-func formatOutputTargetSegment(targetValue string) string {
-	normalized := strings.TrimSpace(strings.ReplaceAll(targetValue, "\\", "/"))
-	switch normalized {
-	case "", ".", "./":
-		return "root-package"
-	case "...", "./...":
-		return "all-packages"
-	}
-
-	if strings.HasPrefix(normalized, "./") {
-		normalized = strings.TrimPrefix(normalized, "./")
-	}
-
-	replacer := strings.NewReplacer("/", "-", ".", "-")
-	return sanitizeOutputSegment(replacer.Replace(normalized))
 }

@@ -29,11 +29,13 @@ type Executor interface {
 }
 
 type Result struct {
-	Target string
-	Timing timing.Result
-	Stderr string
-	Advice []string
-	Err    error
+	Target    string
+	StartedAt time.Time
+	EndedAt   time.Time
+	Timing    timing.Result
+	Stderr    string
+	Advice    []string
+	Err       error
 }
 
 func (r Runner) Run(ctx context.Context, t target.BuildTarget) Result {
@@ -45,7 +47,11 @@ func (r Runner) Run(ctx context.Context, t target.BuildTarget) Result {
 	start := now()
 	eventsFile, err := os.CreateTemp("", "gbwatch-events-*.jsonl")
 	if err != nil {
-		return Result{Err: fmt.Errorf("create event file: %w", err)}
+		return Result{
+			StartedAt: start,
+			EndedAt:   now(),
+			Err:       fmt.Errorf("create event file: %w", err),
+		}
 	}
 	eventsPath := eventsFile.Name()
 	eventsFile.Close()
@@ -53,7 +59,11 @@ func (r Runner) Run(ctx context.Context, t target.BuildTarget) Result {
 
 	selfPath, err := os.Executable()
 	if err != nil {
-		return Result{Err: fmt.Errorf("resolve executable path: %w", err)}
+		return Result{
+			StartedAt: start,
+			EndedAt:   now(),
+			Err:       fmt.Errorf("resolve executable path: %w", err),
+		}
 	}
 
 	toolExecCmd := strings.Join([]string{
@@ -71,7 +81,12 @@ func (r Runner) Run(ctx context.Context, t target.BuildTarget) Result {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
-		return Result{Err: fmt.Errorf("start go build: %w", err)}
+		return Result{
+			Target:    t.BuildArg,
+			StartedAt: start,
+			EndedAt:   now(),
+			Err:       fmt.Errorf("start go build: %w", err),
+		}
 	}
 
 	waitErr := cmd.Wait()
@@ -80,9 +95,11 @@ func (r Runner) Run(ctx context.Context, t target.BuildTarget) Result {
 	durations, parseErr := readToolExecEvents(eventsPath, packageFilter(t.ModulePath, r.IncludeAllPackages))
 
 	result := Result{
-		Target: t.BuildArg,
-		Timing: timing.FromDurations(durations, end.Sub(start)),
-		Stderr: strings.TrimSpace(stderr.String()),
+		Target:    t.BuildArg,
+		StartedAt: start,
+		EndedAt:   end,
+		Timing:    timing.FromDurations(durations, end.Sub(start)),
+		Stderr:    strings.TrimSpace(stderr.String()),
 	}
 	if len(durations) == 0 {
 		result.Advice = append(result.Advice,
@@ -105,11 +122,20 @@ func (r Runner) Run(ctx context.Context, t target.BuildTarget) Result {
 }
 
 type ExampleRunner struct {
+	Now                Clock
 	IncludeAllPackages bool
 }
 
 func (r ExampleRunner) Run(ctx context.Context, t target.BuildTarget) Result {
 	_ = ctx
+
+	now := r.Now
+	if now == nil {
+		now = func() time.Time {
+			return time.Date(2026, 1, 2, 15, 4, 5, 0, time.UTC)
+		}
+	}
+	start := now()
 
 	records := []timing.PackageRecord{
 		{ImportPath: "example.com/demo/internal/config", Duration: 120 * time.Millisecond},
@@ -129,6 +155,7 @@ func (r ExampleRunner) Run(ctx context.Context, t target.BuildTarget) Result {
 	for _, record := range records {
 		total += record.Duration
 	}
+	end := start.Add(total)
 
 	sort.Slice(records, func(i, j int) bool {
 		if records[i].Duration == records[j].Duration {
@@ -148,7 +175,9 @@ func (r ExampleRunner) Run(ctx context.Context, t target.BuildTarget) Result {
 	}
 
 	return Result{
-		Target: targetArg,
+		Target:    targetArg,
+		StartedAt: start,
+		EndedAt:   end,
 		Timing: timing.Result{
 			Packages:      records,
 			TotalDuration: total,

@@ -15,7 +15,6 @@ type OutputFormat string
 const (
 	OutputFormatPretty OutputFormat = "pretty"
 	OutputFormatJSON   OutputFormat = "json"
-	OutputFormatTOML   OutputFormat = "toml"
 	OutputFormatCSV    OutputFormat = "csv"
 )
 
@@ -76,6 +75,7 @@ type fileSettings struct {
 	IncludeAllPackages *bool   `toml:"all_packages"`
 	Debug              *bool   `toml:"debug"`
 	OutputFormat       string  `toml:"output_format"`
+	ReportName         *string `toml:"report_name"`
 	OutputPath         *string `toml:"output_path"`
 }
 
@@ -138,12 +138,23 @@ func ParseOutputFormat(raw string) (OutputFormat, error) {
 		return OutputFormatPretty, nil
 	case string(OutputFormatJSON):
 		return OutputFormatJSON, nil
-	case string(OutputFormatTOML):
-		return OutputFormatTOML, nil
 	case string(OutputFormatCSV):
 		return OutputFormatCSV, nil
 	default:
 		return "", fmt.Errorf("unknown output format: %s", raw)
+	}
+}
+
+func OutputFormatFromReportName(name string) (OutputFormat, bool) {
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(name))) {
+	case ".json":
+		return OutputFormatJSON, true
+	case ".csv":
+		return OutputFormatCSV, true
+	case ".txt":
+		return OutputFormatPretty, true
+	default:
+		return "", false
 	}
 }
 
@@ -190,6 +201,14 @@ func mergeFileConfig(cfg *AppConfig, path string) error {
 	}
 	if raw.Settings.OutputPath != nil {
 		cfg.Settings.OutputPath = strings.TrimSpace(*raw.Settings.OutputPath)
+	}
+	if raw.Settings.ReportName != nil {
+		cfg.Settings.OutputPath = strings.TrimSpace(*raw.Settings.ReportName)
+	}
+	if raw.Settings.OutputFormat == "" {
+		if format, ok := OutputFormatFromReportName(cfg.Settings.OutputPath); ok {
+			cfg.Settings.OutputFormat = format
+		}
 	}
 
 	return nil

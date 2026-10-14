@@ -79,7 +79,13 @@ gbwatch . --target ./... --format json
 gbwatch . --target ./... --debug
 gbwatch . --format json
 gbwatch . --format csv
-gbwatch . --format toml --output-path=./reports/build.toml
+gbwatch . --report-name timing.json
+gbwatch . --report-name timing -f json
+gbwatch . --report-name=./reports/build.csv
+gbwatch help
+gbwatch help format
+gbwatch help format csv
+gbwatch help csv
 gbwatch --example
 ```
 
@@ -90,12 +96,20 @@ Common flags:
 - `--debug`: enable debug logging
 - `--version`: print the embedded build version and exit
 - `--config`: load a specific config file
-- `--format`: `pretty`, `json`, `toml`, or `csv`
-- `--output-path`, `-o`: write the rendered output to a file instead of stdout
-  - pass `-o` with no value to use an auto-generated filename
-  - pass `--output-path=<path>` or `-o=<path>` to use that path as the base name, with a timestamp suffix added automatically
-  - for `json`, `toml`, and `csv`, gbwatch rewrites a missing or mismatched extension to the format's canonical extension
+- `--format`: `pretty`, `json`, or `csv`
+- `--report-name`, `-r`: name a report file instead of writing to stdout
+  - pass `-r` with no value to use an auto-generated filename
+  - pass `--report-name=<name>` or `-r=<name>` to set its base name, optionally including a directory
+  - `.json`, `.csv`, and `.txt` select JSON, CSV, and pretty output when `--format` is absent
+  - `--report-name timing.json` and `--report-name timing -f json` produce equivalent JSON reports
+  - a conflicting suffix and explicit format, such as `-r report.json -f csv`, is an error
+  - file names use `{report-name}-{module-name}-{build-start-time}{UTC-offset}.{extension}`, using the machine's local timezone (for example, `timing-my-module-20261014-152109+0800.json`)
+  - if a timestamped name already exists, gbwatch adds a numeric suffix rather than replacing the earlier report
+  - for `json` and `csv`, gbwatch adds the format's extension when the name has none or an unrecognized extension
   - for `pretty`, gbwatch keeps the user-provided extension as-is
+- `gbwatch help [topic]`: show topic help; `gbwatch help` is the same as `gbwatch -h`
+  - use `gbwatch help format` to browse formats; `gbwatch help csv` and `gbwatch help format csv` both describe the CSV file layout
+  - unknown help topics return an error and a nonzero exit code
 
 #### JSON output structure
 
@@ -105,34 +119,52 @@ Example shape:
 
 ```json
 {
+  "total_duration_ms": 65000,
+  "total_duration_human": "1 minute 5 seconds",
   "target": "./...",
-  "packages": [
-    {
-      "import_path": "example.com/project/internal/service",
-      "duration_ms": 540
-    }
-  ],
-  "total_duration_ms": 1150,
+  "started_at": "2026-01-02T15:04:05Z",
+  "ended_at": "2026-01-02T15:05:10Z",
   "status": "success",
   "stderr": "optional human note",
   "advice": [
     "optional human hint"
   ],
-  "error": "optional error string"
+  "packages": [
+    {
+      "import_path": "example.com/project/internal/service",
+      "duration_ms": 540,
+      "duration_human": "540 milliseconds"
+    }
+  ]
 }
 ```
 
 Fields:
 
 - `target`: normalized build target actually used
+- `total_duration_ms`: total measured duration in milliseconds
+- `total_duration_human`: readable duration formatted with `github.com/hako/durafmt`, such as `4 minutes 45 seconds`
 - `packages`: sorted package timing list
+- `started_at`: wall-clock timestamp when the build attempt began, in RFC3339 format with its recorded timezone offset
+- `ended_at`: wall-clock timestamp when the build attempt ended, in RFC3339 format with its recorded timezone offset
 - `packages[].import_path`: package import path
 - `packages[].duration_ms`: estimated duration in milliseconds
-- `total_duration_ms`: total measured duration in milliseconds
+- `packages[].duration_human`: package duration in readable units, including remaining seconds; `duration_ms` retains the exact millisecond value
 - `status`: `success` or `failed`
 - `stderr`: optional human-oriented note
 - `advice`: optional human-oriented hints
-- `error`: optional build error string
+- `error`: optional build error string on failed builds
+
+#### CSV file output
+
+When writing CSV to a file, gbwatch writes a matched pair:
+
+```text
+timing-my-module-20261014-151002+0800.json
+timing-my-module-20261014-151002+0800.csv
+```
+
+The JSON file contains build metadata (target, total duration, start and end times, status, and any stderr or advice) without package rows. The CSV file contains only package timing rows with `import_path,duration_ms,duration_human`. Both files use the same stem and, on a filename collision, the same numeric suffix. CSV sent to stdout contains only package rows.
 
 ## 3. Configuration
 
@@ -151,28 +183,28 @@ Example config:
 target = "./..."
 all_packages = false
 debug = false
-output_format = "pretty"
-output_path = "./reports/build.toml"
+report_name = "./reports/build.json"
 ```
 
 Supported `output_format` values:
 
 - `pretty`
 - `json`
-- `toml`
 - `csv`
 
 Behavior:
 
-- if `output_path` is empty, output is written to stdout
-- if `-o` is passed with no value, gbwatch writes to an auto-generated file name in the current working directory where `gbwatch` is run
-- the auto-generated file name contains a leading text (`gbwatch`), module name, target, and timestamp
-- in the auto-generated file name, target `./...` becomes `all-packages`, target `.` becomes `root-package`, and relative targets such as `./cmd/server` become `cmd-server`
-- if `--output-path=<path>` or `output_path` is set, gbwatch appends a timestamp to the file name before writing so reruns do not overwrite earlier results
-- for `json`, `toml`, and `csv`, gbwatch rewrites the explicit file extension to match the selected format when needed
-- for `pretty`, gbwatch preserves the explicit file name and extension and only adds the timestamp
+- if `report_name` is empty and `--report-name` is absent, output is written to stdout
+- if `-r` is passed with no value, gbwatch writes to an auto-generated file name in the current working directory where `gbwatch` is run
+- the auto-generated file name contains `gbwatch`, the module name, and the build start time in the local timezone with its numeric UTC offset
+- if `--report-name=<name>` or `report_name` is set, gbwatch appends the module name, local build start time, and UTC offset to the file name before writing
+- the old config key `output_path` remains readable for existing config files; `report_name` takes precedence when both are present
+- if that name already exists, gbwatch adds `-2`, `-3`, and so on before the extension; CSV companions share the suffix
+- for `json` and `csv`, gbwatch replaces an unrecognized extension with the selected format's extension; a recognized conflicting extension is an error
+- for `pretty`, gbwatch preserves the explicit extension and adds the module name and start time
 - `output_format = "pretty"` gives the human-readable report
-- `output_format = "json"`, `toml`, and `csv` are convenient for later analytics
+- `output_format = "json"` and `csv` are convenient for later analytics
+- CSV contains package rows with `duration_ms` and `duration_human`; in file mode a companion JSON report holds the build metadata
 - in file mode, only a successful run with captured package timing rows writes a file; failed builds or empty timing results cancel file output and print a pretty advisory report to the console instead
 
 ## 4. Note
