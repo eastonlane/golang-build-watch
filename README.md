@@ -45,7 +45,7 @@ Override the embedded build version explicitly:
 make build VERSION=v0.1.0
 ```
 
-If `VERSION` is not set, `make` uses the current short git commit hash.
+If `VERSION` is not set, `make` uses the current short git commit hash. When tracked files have changes or untracked files are present, `make` appends `-dirty` to the embedded version, including when `VERSION` is set explicitly.
 
 Cross-platform builds:
 

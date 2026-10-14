@@ -1,7 +1,9 @@
 BINARY := gbwatch
 OUT_DIR := bin
 VERSION ?= $(shell git rev-parse --short HEAD)
-LDFLAGS := -X golang-build-watch/internal/version.Value=$(VERSION)
+DIRTY := $(shell git status --porcelain --untracked-files=normal)
+BUILD_VERSION := $(VERSION)$(if $(DIRTY),-dirty)
+LDFLAGS := -X golang-build-watch/internal/version.Value=$(BUILD_VERSION)
 
 .PHONY: build build-all build-windows build-linux build-macos test clean
 
