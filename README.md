@@ -75,6 +75,7 @@ gbwatch . --target .
 gbwatch . --target ./...
 gbwatch . --target ./cmd/server
 gbwatch . --target ./... --all-packages
+gbwatch . --progress-packages 6
 gbwatch . --target ./... --format json
 gbwatch . --target ./... --debug
 gbwatch . --format json
@@ -94,6 +95,7 @@ Common flags:
 - `--target`: build target relative to the module root
 - `--all-packages`: include packages outside the current module
 - `--debug`: enable debug logging
+- `--progress-packages`: show the active package and up to N-1 recently completed packages while building (default 4; valid range 1-20)
 - `--version`: print the embedded build version and exit
 - `--config`: load a specific config file
 - `--format`: `pretty`, `json`, or `csv`

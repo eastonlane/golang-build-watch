@@ -20,7 +20,10 @@ import (
 	"golang-build-watch/internal/target"
 )
 
-const autoReportValue = "__auto__"
+const (
+	autoReportValue         = "__auto__"
+	defaultProgressPackages = 4
+)
 
 var outputTimestampNow = time.Now
 
@@ -39,13 +42,14 @@ func newRootCmdWithVersion(buildVersion string) *cobra.Command {
 	var configPath string
 	var outputFormatRaw string
 	var outputPath string
+	var progressPackages int
 
 	cmd := &cobra.Command{
 		Use:           "gbwatch <module-root>",
 		Short:         "Measure approximate build time per package for a Go module",
 		Example:       "  gbwatch help format\n  gbwatch help format csv",
 		Args:          rootArgs(&example),
-		RunE:          newRunE(&buildTarget, &allPackages, &example, &debug, &configPath, &outputFormatRaw, &outputPath),
+		RunE:          newRunE(&buildTarget, &allPackages, &example, &debug, &configPath, &outputFormatRaw, &outputPath, &progressPackages),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       buildVersion,
@@ -71,6 +75,7 @@ func newRootCmdWithVersion(buildVersion string) *cobra.Command {
 	cmd.Flags().BoolVar(&allPackages, "all-packages", false, "include packages outside the target module in timing output")
 	cmd.Flags().BoolVar(&example, "example", false, "print mock build timing output and exit")
 	cmd.Flags().BoolVar(&debug, "debug", false, "enable debug logging")
+	cmd.Flags().IntVar(&progressPackages, "progress-packages", defaultProgressPackages, fmt.Sprintf("package lines to show during a build (1-%d, including the active package)", build.MaxProgressPackages))
 	help := newHelpCommand(cmd)
 	cmd.AddCommand(help)
 	cmd.SetHelpCommand(help)
@@ -106,8 +111,12 @@ func newRunE(
 	configPath *string,
 	outputFormatRaw *string,
 	outputPath *string,
+	progressPackages *int,
 ) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
+		if *progressPackages < 1 || *progressPackages > build.MaxProgressPackages {
+			return fmt.Errorf("--progress-packages must be between 1 and %d", build.MaxProgressPackages)
+		}
 		outputPathValue, normalizedArgs := normalizeOutputPathArgs(*outputPath, args, *example)
 		moduleRoot := ""
 		if len(normalizedArgs) > 0 {
@@ -155,6 +164,7 @@ func newRunE(
 			targetValue,
 			cmd.ErrOrStderr(),
 			!appCfg.Example && !appCfg.Settings.Debug,
+			*progressPackages,
 		)
 
 		output, err := renderer.Render(result)
@@ -252,38 +262,170 @@ func debugLogger(w interface{ Write([]byte) (int, error) }, enabled bool) *slog.
 	}))
 }
 
-func runWithLoading(ctx context.Context, executor build.Executor, t target.BuildTarget, w io.Writer, enabled bool) build.Result {
+func runWithLoading(ctx context.Context, executor build.Executor, t target.BuildTarget, w io.Writer, enabled bool, packageLines int) build.Result {
 	if !enabled {
 		return executor.Run(ctx, t)
 	}
 
-	type runResult struct {
-		result build.Result
-	}
-
-	done := make(chan runResult, 1)
+	done := make(chan build.Result, 1)
+	updates := make(chan build.Progress, 1)
 	go func() {
-		done <- runResult{result: executor.Run(ctx, t)}
+		if progressExecutor, ok := executor.(build.ProgressExecutor); ok {
+			done <- progressExecutor.RunWithProgress(ctx, t, func(progress build.Progress) {
+				select {
+				case updates <- progress:
+				default:
+					select {
+					case <-updates:
+					default:
+					}
+					select {
+					case updates <- progress:
+					default:
+					}
+				}
+			})
+			return
+		}
+		done <- executor.Run(ctx, t)
 	}()
 
-	ticker := time.NewTicker(120 * time.Millisecond)
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	frames := []string{"|", "/", "-", `\`}
 	index := 0
-	fmt.Fprintf(w, "\r[%s] building target %s", frames[index], t.BuildArg)
-	index++
+	display := newLoadingDisplay(w, t.BuildArg, packageLines)
+	display.draw(frames[index])
 
 	for {
 		select {
-		case wrapped := <-done:
-			fmt.Fprint(w, "\r                              \r")
-			return wrapped.result
+		case result := <-done:
+			select {
+			case progress := <-updates:
+				display.progress = progress
+			default:
+			}
+			display.finish(result.Err)
+			return result
+		case progress := <-updates:
+			display.progress = progress
+			display.draw(frames[index%len(frames)])
 		case <-ticker.C:
-			fmt.Fprintf(w, "\r[%s] building target %s", frames[index%len(frames)], t.BuildArg)
 			index++
+			display.draw(frames[index%len(frames)])
 		}
 	}
+}
+
+type loadingDisplay struct {
+	w            io.Writer
+	target       string
+	packageLines int
+	progress     build.Progress
+	terminal     bool
+	lines        int
+	lastProgress string
+	lastFrame    string
+	lastRows     []string
+	finished     bool
+	failed       bool
+}
+
+func newLoadingDisplay(w io.Writer, target string, packageLines int) *loadingDisplay {
+	display := &loadingDisplay{w: w, target: target, packageLines: packageLines}
+	if file, ok := w.(*os.File); ok {
+		if info, err := file.Stat(); err == nil {
+			display.terminal = info.Mode()&os.ModeCharDevice != 0
+		}
+	}
+	return display
+}
+
+func (d *loadingDisplay) draw(frame string) {
+	rows := make([]string, 0, d.packageLines)
+	completed := d.progress.Completed
+	limit := d.packageLines - 1
+	if d.finished {
+		limit = d.packageLines
+	}
+	if len(completed) > limit {
+		completed = completed[len(completed)-limit:]
+	}
+	for _, record := range completed {
+		rows = append(rows, fmt.Sprintf("    %s  %s", record.Duration.Round(time.Millisecond), record.ImportPath))
+	}
+	if d.progress.Current != "" {
+		if d.finished {
+			rows = append(rows, "    "+d.progress.Current)
+		} else {
+			rows = append(rows, "  > "+d.progress.Current)
+		}
+	}
+	header := fmt.Sprintf("[%s] building target %s", frame, d.target)
+	if d.finished {
+		header = fmt.Sprintf("[ok] built target %s", d.target)
+		if d.failed {
+			header = fmt.Sprintf("[failed] build target %s", d.target)
+		}
+	}
+	if !d.terminal {
+		progressText := strings.Join(rows, "\n")
+		if d.finished {
+			progressText = header + "\n" + progressText
+		}
+		if d.lines == 0 || progressText != d.lastProgress {
+			fmt.Fprintln(d.w, strings.Join(append([]string{header}, rows...), "\n"))
+		}
+		d.lastProgress = progressText
+		d.lines = len(rows) + 1
+		return
+	}
+
+	var output strings.Builder
+	if d.lines == 0 {
+		fmt.Fprintln(&output, header)
+		for range d.packageLines {
+			output.WriteByte('\n')
+		}
+		d.lines = d.packageLines + 1
+		d.lastRows = make([]string, d.packageLines)
+		d.lastFrame = frame
+	} else if d.finished {
+		fmt.Fprintf(&output, "\x1b[%dA\r\x1b[2K%s\x1b[%dB\r", d.lines, header, d.lines)
+	} else if frame != d.lastFrame {
+		fmt.Fprintf(&output, "\x1b[%dA\r[%s]\x1b[%dB\r", d.lines, frame, d.lines)
+		d.lastFrame = frame
+	}
+	for i := range d.lastRows {
+		row := ""
+		if i < len(rows) {
+			row = rows[i]
+		}
+		if row == d.lastRows[i] {
+			continue
+		}
+		distance := d.lines - i - 1
+		fmt.Fprintf(&output, "\x1b[%dA\r\x1b[2K", distance)
+		if row != "" {
+			if i == len(rows)-1 && d.progress.Current != "" && !d.finished {
+				output.WriteString("\x1b[1;36m")
+			} else {
+				output.WriteString("\x1b[2m")
+			}
+			output.WriteString(row)
+			output.WriteString("\x1b[0m")
+		}
+		fmt.Fprintf(&output, "\x1b[%dB\r", distance)
+		d.lastRows[i] = row
+	}
+	_, _ = io.WriteString(d.w, output.String())
+}
+
+func (d *loadingDisplay) finish(err error) {
+	d.finished = true
+	d.failed = err != nil
+	d.draw("")
 }
 
 func flagBool(cmd *cobra.Command, name string, value bool) *bool {

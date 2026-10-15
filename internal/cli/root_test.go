@@ -15,6 +15,7 @@ import (
 	"golang-build-watch/internal/build"
 	"golang-build-watch/internal/config"
 	"golang-build-watch/internal/target"
+	"golang-build-watch/internal/timing"
 )
 
 func TestRootCmdRequiresModuleRootArgument(t *testing.T) {
@@ -590,9 +591,48 @@ func TestRootCmdRejectsTOMLOutput(t *testing.T) {
 	}
 }
 
+func TestRootCmdValidatesProgressPackages(t *testing.T) {
+	for _, value := range []string{"0", "21"} {
+		t.Run(value, func(t *testing.T) {
+			cmd := NewRootCmd()
+			cmd.SetArgs([]string{"--example", "--progress-packages", value})
+			if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--progress-packages must be between 1 and 20") {
+				t.Fatalf("Execute() error = %v", err)
+			}
+		})
+	}
+	for _, value := range []string{"1", "20"} {
+		t.Run(value, func(t *testing.T) {
+			cmd := NewRootCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetArgs([]string{"--example", "--progress-packages", value})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+		})
+	}
+}
+
 type slowExecutor struct {
 	delay  time.Duration
 	result build.Result
+}
+
+type progressExecutor struct{}
+
+func (progressExecutor) Run(_ context.Context, _ target.BuildTarget) build.Result {
+	return build.Result{}
+}
+
+func (progressExecutor) RunWithProgress(_ context.Context, _ target.BuildTarget, onProgress func(build.Progress)) build.Result {
+	onProgress(build.Progress{Current: "example.com/a"})
+	time.Sleep(30 * time.Millisecond)
+	onProgress(build.Progress{
+		Current:   "example.com/b",
+		Completed: []timing.PackageRecord{{ImportPath: "example.com/a", Duration: time.Second}},
+	})
+	time.Sleep(30 * time.Millisecond)
+	return build.Result{Target: "./..."}
 }
 
 func (e slowExecutor) Run(_ context.Context, _ target.BuildTarget) build.Result {
@@ -611,6 +651,7 @@ func TestRunWithLoadingShowsImmediateMessage(t *testing.T) {
 		target.BuildTarget{BuildArg: "./..."},
 		&stderr,
 		true,
+		4,
 	)
 
 	if result.Target != "./..." {
@@ -618,6 +659,92 @@ func TestRunWithLoadingShowsImmediateMessage(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "building target ./...") {
 		t.Fatalf("stderr missing loading text:\n%s", stderr.String())
+	}
+}
+
+func TestRunWithLoadingShowsPackageProgress(t *testing.T) {
+	var stderr bytes.Buffer
+	result := runWithLoading(context.Background(), progressExecutor{}, target.BuildTarget{BuildArg: "./..."}, &stderr, true, 2)
+	if result.Target != "./..." || !strings.Contains(stderr.String(), "1s  example.com/a") || !strings.Contains(stderr.String(), "> example.com/b") || !strings.Contains(stderr.String(), "[ok] built target ./...") {
+		t.Fatalf("result = %+v, progress = %q", result, stderr.String())
+	}
+}
+
+func TestLoadingDisplayLimitsRecentPackages(t *testing.T) {
+	var output bytes.Buffer
+	display := newLoadingDisplay(&output, "./...", 3)
+	display.progress = build.Progress{
+		Current: "example.com/current",
+		Completed: []timing.PackageRecord{
+			{ImportPath: "example.com/old", Duration: time.Second},
+			{ImportPath: "example.com/recent", Duration: 2 * time.Second},
+			{ImportPath: "example.com/latest", Duration: 3 * time.Second},
+		},
+	}
+	display.draw("|")
+	got := output.String()
+	if strings.Contains(got, "example.com/old") || !strings.Contains(got, "2s  example.com/recent") || !strings.Contains(got, "3s  example.com/latest") || !strings.Contains(got, "> example.com/current") {
+		t.Fatalf("unexpected progress display:\n%s", got)
+	}
+
+	output.Reset()
+	display = newLoadingDisplay(&output, "./...", 1)
+	display.progress = build.Progress{Current: "example.com/current", Completed: []timing.PackageRecord{{ImportPath: "example.com/old", Duration: time.Second}}}
+	display.draw("|")
+	if strings.Contains(output.String(), "example.com/old") || !strings.Contains(output.String(), "> example.com/current") {
+		t.Fatalf("unexpected single-package display:\n%s", output.String())
+	}
+}
+
+func TestLoadingDisplayUpdatesOnlyChangedTerminalRows(t *testing.T) {
+	var output bytes.Buffer
+	display := newLoadingDisplay(&output, "./...", 2)
+	display.terminal = true
+	display.progress = build.Progress{Current: "example.com/a"}
+	display.draw("|")
+	if !strings.Contains(output.String(), "\x1b[1;36m  > example.com/a\x1b[0m") {
+		t.Fatalf("active package is not emphasized: %q", output.String())
+	}
+
+	output.Reset()
+	display.draw("/")
+	if strings.Contains(output.String(), "\x1b[2K") || !strings.Contains(output.String(), "[/]") {
+		t.Fatalf("spinner tick repainted package rows: %q", output.String())
+	}
+
+	output.Reset()
+	display.progress = build.Progress{
+		Current:   "example.com/b",
+		Completed: []timing.PackageRecord{{ImportPath: "example.com/a", Duration: time.Second}},
+	}
+	display.draw("/")
+	if !strings.Contains(output.String(), "\x1b[2m    1s  example.com/a\x1b[0m") || !strings.Contains(output.String(), "\x1b[1;36m  > example.com/b\x1b[0m") {
+		t.Fatalf("package styles are incorrect: %q", output.String())
+	}
+}
+
+func TestLoadingDisplayKeepsFinalStatus(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		err    error
+		status string
+	}{
+		{name: "success", status: "[ok] built target ./..."},
+		{name: "failure", err: errors.New("build failed"), status: "[failed] build target ./..."},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			display := newLoadingDisplay(&output, "./...", 2)
+			display.terminal = true
+			display.progress = build.Progress{Current: "example.com/b"}
+			display.draw("|")
+			output.Reset()
+			display.progress = build.Progress{Completed: []timing.PackageRecord{{ImportPath: "example.com/b", Duration: time.Second}}}
+			display.finish(test.err)
+			if !strings.Contains(output.String(), test.status) || !strings.Contains(output.String(), "1s  example.com/b") {
+				t.Fatalf("final display = %q", output.String())
+			}
+		})
 	}
 }
 

@@ -17,6 +17,7 @@ const toolExecImportPathEnv = "TOOLEXEC_IMPORTPATH"
 type toolExecEvent struct {
 	ImportPath string        `json:"import_path"`
 	Tool       string        `json:"tool"`
+	Phase      string        `json:"phase,omitempty"`
 	DurationNS time.Duration `json:"duration_ns"`
 }
 
@@ -44,15 +45,22 @@ func RunToolExec(args []string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
 
+	importPath := strings.TrimSpace(os.Getenv(toolExecImportPathEnv))
+	if importPath != "" {
+		if err := appendToolExecEvent(eventsFile, toolExecEvent{ImportPath: importPath, Phase: "start"}); err != nil {
+			return err
+		}
+	}
+
 	start := time.Now()
 	err := cmd.Run()
 	duration := time.Since(start)
 
-	importPath := strings.TrimSpace(os.Getenv(toolExecImportPathEnv))
 	if importPath != "" {
 		if writeErr := appendToolExecEvent(eventsFile, toolExecEvent{
 			ImportPath: importPath,
 			Tool:       filepath.Base(toolPath),
+			Phase:      "end",
 			DurationNS: duration,
 		}); writeErr != nil && err == nil {
 			err = writeErr
@@ -99,7 +107,7 @@ func readToolExecEvents(path string, include func(string) bool) (map[string]time
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			return nil, fmt.Errorf("decode tool event: %w", err)
 		}
-		if !include(event.ImportPath) {
+		if event.Phase == "start" || !include(event.ImportPath) {
 			continue
 		}
 		durations[event.ImportPath] += event.DurationNS

@@ -3,7 +3,9 @@ package build
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -18,6 +20,8 @@ import (
 
 type Clock func() time.Time
 
+const MaxProgressPackages = 20
+
 type Runner struct {
 	Now                Clock
 	IncludeAllPackages bool
@@ -26,6 +30,15 @@ type Runner struct {
 
 type Executor interface {
 	Run(ctx context.Context, t target.BuildTarget) Result
+}
+
+type Progress struct {
+	Current   string
+	Completed []timing.PackageRecord
+}
+
+type ProgressExecutor interface {
+	RunWithProgress(ctx context.Context, t target.BuildTarget, onProgress func(Progress)) Result
 }
 
 type Result struct {
@@ -39,6 +52,10 @@ type Result struct {
 }
 
 func (r Runner) Run(ctx context.Context, t target.BuildTarget) Result {
+	return r.RunWithProgress(ctx, t, nil)
+}
+
+func (r Runner) RunWithProgress(ctx context.Context, t target.BuildTarget, onProgress func(Progress)) Result {
 	now := r.Now
 	if now == nil {
 		now = time.Now
@@ -89,7 +106,27 @@ func (r Runner) Run(ctx context.Context, t target.BuildTarget) Result {
 		}
 	}
 
-	waitErr := cmd.Wait()
+	var waitErr error
+	if onProgress == nil {
+		waitErr = cmd.Wait()
+	} else {
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		progress := progressReader{durations: make(map[string]time.Duration)}
+		for {
+			select {
+			case waitErr = <-done:
+				progress.read(eventsPath, onProgress)
+				progress.finish(onProgress)
+				goto buildFinished
+			case <-ticker.C:
+				progress.read(eventsPath, onProgress)
+			}
+		}
+	}
+buildFinished:
 	end := now()
 
 	durations, parseErr := readToolExecEvents(eventsPath, packageFilter(t.ModulePath, r.IncludeAllPackages))
@@ -119,6 +156,64 @@ func (r Runner) Run(ctx context.Context, t target.BuildTarget) Result {
 	}
 
 	return result
+}
+
+type progressReader struct {
+	offset    int64
+	current   string
+	durations map[string]time.Duration
+	completed []timing.PackageRecord
+}
+
+func (p *progressReader) read(path string, onProgress func(Progress)) {
+	file, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	if _, err := file.Seek(p.offset, io.SeekStart); err != nil {
+		return
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return
+	}
+	lastNewline := bytes.LastIndexByte(data, '\n')
+	if lastNewline < 0 {
+		return
+	}
+	p.offset += int64(lastNewline + 1)
+	for _, line := range bytes.Split(data[:lastNewline], []byte{'\n'}) {
+		var event toolExecEvent
+		if err := json.Unmarshal(line, &event); err != nil || event.ImportPath == "" {
+			continue
+		}
+		if event.Phase == "start" {
+			if event.ImportPath != p.current {
+				p.completeCurrent()
+				p.current = event.ImportPath
+				onProgress(Progress{Current: p.current, Completed: append([]timing.PackageRecord(nil), p.completed...)})
+			}
+		} else {
+			p.durations[event.ImportPath] += event.DurationNS
+		}
+	}
+}
+
+func (p *progressReader) completeCurrent() {
+	if p.current == "" || p.durations[p.current] <= 0 {
+		return
+	}
+	p.completed = append(p.completed, timing.PackageRecord{ImportPath: p.current, Duration: p.durations[p.current]})
+	if len(p.completed) > MaxProgressPackages {
+		p.completed = p.completed[len(p.completed)-MaxProgressPackages:]
+	}
+}
+
+func (p *progressReader) finish(onProgress func(Progress)) {
+	p.completeCurrent()
+	p.current = ""
+	onProgress(Progress{Completed: append([]timing.PackageRecord(nil), p.completed...)})
 }
 
 type ExampleRunner struct {
